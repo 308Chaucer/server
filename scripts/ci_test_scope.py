@@ -6,7 +6,7 @@ Reads the changed file paths (one per line) from stdin and writes ``mode``,
 
 - ``full``: run the entire suite (a shared/core file, dependency or the CI itself changed)
 - ``partial``: run only the listed ``test_paths`` (one or more changed providers)
-- ``skip``: nothing testable changed (docs, unrelated workflows, ...)
+- ``skip``: nothing testable changed (docs, generated locale data, unrelated workflows, ...)
 
 ``cov_paths`` are the coverage sources matching ``test_paths`` so a partial run only
 measures the providers it actually ran (e.g. ``music_assistant.providers.plex``).
@@ -63,6 +63,10 @@ def decide(changed: list[str], repo_root: Path) -> tuple[str, list[str]]:
     """
     providers: set[str] = set()
     for path in changed:
+        if path.startswith("music_assistant/translations/"):
+            # Generated locale data (Lokalise). No test validates its content; lint's
+            # check-json covers JSON validity. Don't let it force the full suite.
+            continue
         provider = provider_name(path)
         if provider is not None:
             providers.add(provider)

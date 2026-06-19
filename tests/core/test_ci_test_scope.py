@@ -54,22 +54,38 @@ def test_multiple_providers_sorted(repo: Path) -> None:
     [
         "music_assistant/helpers/util.py",
         "music_assistant/controllers/streams/controller.py",
+        "music_assistant/controllers/translations/__init__.py",
         "tests/core/test_genres.py",
         "tests/providers/__init__.py",
-        "music_assistant/translations/en.json",
+        "music_assistant/strings.json",
         "pyproject.toml",
         ".github/workflows/test.yml",
         "scripts/ci_test_scope.py",
     ],
 )
 def test_shared_changes_force_full(repo: Path, path: str) -> None:
-    """Shared code, deps, translations and CI changes run the full suite."""
+    """Shared code, deps, strings authoring and CI changes run the full suite."""
     assert decide([path], repo) == ("full", [])
 
 
 def test_provider_without_tests_forces_full(repo: Path) -> None:
     """A changed provider that has no tests falls back to the full suite."""
     assert decide(["music_assistant/providers/ghost/provider.py"], repo) == ("full", [])
+
+
+def test_translations_only_skips(repo: Path) -> None:
+    """A Lokalise locale-data update runs nothing (lint's check-json validates it)."""
+    paths = ["music_assistant/translations/de.json", "music_assistant/translations/nl.json"]
+    assert decide(paths, repo) == ("skip", [])
+
+
+def test_translations_plus_provider_runs_only_provider(repo: Path) -> None:
+    """Locale data alongside a provider change still scopes to that provider."""
+    paths = [
+        "music_assistant/translations/de.json",
+        "music_assistant/providers/spotify/provider.py",
+    ]
+    assert decide(paths, repo) == ("partial", ["tests/providers/spotify"])
 
 
 def test_docs_only_skips(repo: Path) -> None:
