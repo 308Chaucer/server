@@ -1,13 +1,30 @@
-"""WiiM Player Provider implementation."""
+"""WiiM Player Provider implementation.
+
+FORK CHANGE (all-LinkPlay-brands): the upstream provider verifies discovered
+devices with ``wiim.discovery.verify_wiim_device``, which rejects anything whose
+UPnP ``manufacturer`` is not "Linkplay"/"Audio Pro AB". That excludes other
+LinkPlay-based brands (e.g. Arylic, whose manufacturer is "Rakoit Technology").
+Those brands speak the identical LinkPlay HTTP API and wmrm multiroom protocol,
+so they group/sync fine with WiiM units. This fork replaces that brand gate with
+a brand-agnostic check: accept any device that answers the LinkPlay HTTP API
+(``getStatusEx`` returns a ``uuid``). Discovery is still scoped to LinkPlay via
+the ``_linkplay._tcp.local.`` mDNS service and the manual-IP allow-list, so this
+does not pull in unrelated UPnP renderers.
+"""
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, cast
+from urllib.parse import urlparse
 
+from aiohttp import ClientTimeout
+from async_upnp_client.aiohttp import AiohttpSessionRequester
+from async_upnp_client.client_factory import UpnpFactory
 from music_assistant_models.enums import IdentifierType
 from wiim import WiimController
-from wiim.discovery import async_create_wiim_device, verify_wiim_device
+from wiim.discovery import async_create_wiim_device
 from wiim.exceptions import WiimDeviceException, WiimRequestException
 from zeroconf import ServiceStateChange
 
@@ -22,7 +39,45 @@ from .constants import PLAYER_ID_PREFIX
 from .player import WiimPlayer
 
 if TYPE_CHECKING:
+    from aiohttp import ClientSession
+    from async_upnp_client.client import UpnpDevice
     from zeroconf.asyncio import AsyncServiceInfo
+
+_VERIFY_TIMEOUT = ClientTimeout(total=5)
+
+
+async def verify_linkplay_device(location: str, session: ClientSession) -> UpnpDevice | None:
+    """Verify a description URL points at *any* LinkPlay device (brand-agnostic).
+
+    Returns the UpnpDevice if it builds AND the host answers the LinkPlay HTTP API
+    (``getStatusEx`` with a ``uuid``); otherwise None. Replaces the upstream
+    ``verify_wiim_device`` so non-WiiM LinkPlay brands (Arylic, Audio Pro, etc.)
+    are accepted.
+    """
+    try:
+        requester = AiohttpSessionRequester(session, with_sleep=True, timeout=5)
+        device = await UpnpFactory(requester).async_create_device(location)
+    except Exception:  # noqa: BLE001 - any UPnP/connection error => not verifiable
+        return None
+    if not device or not device.udn:
+        return None
+
+    host = urlparse(location).hostname
+    if not host:
+        return None
+    # Brand-agnostic LinkPlay confirmation via the device HTTP API.
+    # WiiM units serve HTTPS:443 (self-signed); older LinkPlay (Arylic) serve HTTP:80.
+    for base in (f"https://{host}", f"http://{host}"):
+        try:
+            async with session.get(
+                f"{base}/httpapi.asp?command=getStatusEx", ssl=False, timeout=_VERIFY_TIMEOUT
+            ) as resp:
+                data = json.loads(await resp.text())
+            if data.get("uuid"):
+                return device
+        except Exception:  # noqa: BLE001 - try the other scheme / give up
+            continue
+    return None
 
 
 class WiimProvider(PlayerProvider):
@@ -59,7 +114,7 @@ class WiimProvider(PlayerProvider):
             matched_location = None
             upnp_device = None
             for location in potential_locations:
-                upnp_device = await verify_wiim_device(location, self.mass.http_session_no_ssl)
+                upnp_device = await verify_linkplay_device(location, self.mass.http_session_no_ssl)
                 if upnp_device:
                     matched_location = location
                     break
@@ -103,7 +158,7 @@ class WiimProvider(PlayerProvider):
             self.mass.players.trigger_player_update(wiim_player_id)
             return
 
-        # New device -- verify it's a WiiM and set up
+        # New device -- verify it's a LinkPlay device and set up
         self.logger.debug("mDNS callback: new device, verifying at %s", cur_address)
         potential_locations = (
             f"http://{cur_address}:{get_port_from_zeroconf(info)}/description.xml",
@@ -114,13 +169,13 @@ class WiimProvider(PlayerProvider):
         matched_location = None
         upnp_device = None
         for location in potential_locations:
-            upnp_device = await verify_wiim_device(location, self.mass.http_session_no_ssl)
+            upnp_device = await verify_linkplay_device(location, self.mass.http_session_no_ssl)
             if upnp_device:
                 matched_location = location
                 break
 
         if not upnp_device or not matched_location:
-            self.logger.debug("mDNS callback: verify_wiim_device failed for %s", cur_address)
+            self.logger.debug("mDNS callback: verify_linkplay_device failed for %s", cur_address)
             return
 
         player_id = f"{PLAYER_ID_PREFIX}{upnp_device.udn}"
@@ -151,7 +206,7 @@ class WiimProvider(PlayerProvider):
         upnp_location: str,
         mac_address: str | None = None,
     ) -> None:
-        """Try to add a WiiM device as a player."""
+        """Try to add a LinkPlay device as a player."""
         try:
             wiim_dev = await async_create_wiim_device(
                 upnp_location,
